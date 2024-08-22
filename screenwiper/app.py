@@ -5,39 +5,45 @@ from PIL import Image
 import re
 from datetime import datetime
 import random
-import git
-
+import requests
+import os
+from io import BytesIO
+import paddle
 
 app = Flask(__name__)
+paddle.utils.run_check()
 
 # &PaddleOCR 인스턴스 생성
 ocr = PaddleOCR( lang='korean') 
 
 def perform_ocr(image):
-    """이미지에서 OCR 수행"""
-
+    print("1")
     image_np = np.array(image)
-    # OCR 수행
+    print("2")
     result = ocr.ocr(image_np, cls=True)
+    print("OCR Result:", result)  # 결과 출력
     return result
+
 
 def download_image_from_url(image_url):
     try:
-        # 이미지 다운로드
         response = requests.get(image_url)
-        response.raise_for_status()  # 오류 확인
-
-        # 이미지 바이트로 변환
+        response.raise_for_status()
+        content_type = response.headers.get('Content-Type')
+        if not content_type or not content_type.startswith('image/'):
+            raise ValueError("URL이 이미지 파일이 아닙니다.")
         img = Image.open(BytesIO(response.content))
-
-        # 이미지를 RGB로 변환 (OCR 처리를 위해 필요할 수 있음)
         img = img.convert('RGB')
-
+        img.save('downloaded_image.jpg')  # 이미지 파일 저장하여 확인
         return img
-
     except requests.exceptions.RequestException as e:
         print(f"이미지 다운로드 중 오류가 발생했습니다: {e}")
         return None
+    except (ValueError, IOError) as e:
+        print(f"이미지 처리 중 오류가 발생했습니다: {e}")
+        return None
+
+
 
 # &줄바꿈 함수
 def format_ocr_result(ocr_results):
@@ -157,16 +163,19 @@ def remove_summary(text):
 
 # &카테고리 1 (랜덤 해시태그 설정)
 def extract_summary(hashtags):
+    if not hashtags:  
+        return "해쉬태그 없더"
     summary = random.choice(hashtags).strip()
     return summary
 
+
 # &카테고리1 (시간)
 def extract_operating_hours(text):
-    # 영업 시간 정규식 패턴
+    # Updated 영업 시간 정규식 패턴
     OPERATING_HOURS_PATTERN = (
-        r'(?:오전|오후|매일|매일|월요일|화요일|수요일|목요일|금요일|토요일|일요일|월|화|수|목|금|토|일|평일|주말)?\s*(\d{1,2}):(\d{2})\s*(?:~|-\s*)\s*(?:오전|오후|매일|월요일|화요일|수요일|목요일|금요일|토요일|일요일|월|화|수|목|금|토|일|평일|주말)?\s*(\d{1,2}):(\d{2})|'  # 오전/오후 형식
-        r'(\d{1,2}):(\d{2})\s*(?:~|-\s*)\s*(\d{1,2}):(\d{2})|'  # 24시간 형식
-        r'(매일|월요일|화요일|수요일|목요일|금요일|토요일|일요일)\s*(\d{1,2}):(\d{2})\s*(?:~|-\s*)\s*(\d{1,2}):(\d{2})'
+        r'(?:매일|월요일|화요일|수요일|목요일|금요일|토요일|일요일)?\s*(\d{1,2}):(\d{2})\s*(?:[-~]?\s*)\s*(\d{1,2}):(\d{2})|'  # 24시간 형식
+        r'(?:오전|오후)?\s*(\d{1,2}):(\d{2})\s*(?:[-~]?\s*)(?:오전|오후)?\s*(\d{1,2}):(\d{2})|'  # 오전/오후 형식
+        r'(매일|월요일|화요일|수요일|목요일|금요일|토요일|일요일)\s*(\d{1,2}):(\d{2})\s*(?:[-~]?\s*)\s*(\d{1,2}):(\d{2})'
     )
     
     matches = re.findall(OPERATING_HOURS_PATTERN, text)
@@ -182,7 +191,7 @@ def extract_operating_hours(text):
             end_time = f"{match[2]}:{match[3]}"
             operating_hours.append(f"{start_time} - {end_time}")
         
-        elif len(match) == 8:
+        elif len(match) == 6:
             # 오전/오후 형식
             start_period = match[0] if match[0] else ""
             end_period = match[4] if match[4] else ""
@@ -190,7 +199,7 @@ def extract_operating_hours(text):
             end_time = f"{end_period} {match[3]}:{match[4]}" if end_period else f"{match[3]}:{match[4]}"
             operating_hours.append(f"{start_time} - {end_time}")
         
-        elif len(match) == 10:
+        elif len(match) == 8:
             # 요일 형식
             day = match[0]
             start_time = f"{match[1]}:{match[2]}"
@@ -202,10 +211,11 @@ def extract_operating_hours(text):
 
 
 # &카테고리 1에 대한 JSON 응답 생성
-def generate_category_1_response(image_file, text_results, extracted_places,hashtags):
+def generate_category_1_response(image,image_url, text_results, extracted_places,hashtags):
 
     operating_hours = extract_operating_hours(text_results)
     summary = extract_summary(hashtags)
+    filename = os.path.basename(image_url)
 
     return {
         "categoryId": 1,
@@ -213,30 +223,34 @@ def generate_category_1_response(image_file, text_results, extracted_places,hash
         "address": " ".join(extracted_places), 
         "operatingHours": operating_hours, 
         "summary": summary, 
-        "photoName": image_file.filename,
-        "photoUrl": ""  # ?URL이 제공된 경우 추가
+        "photoName": filename,
+        "photoUrl": image_url 
     }
 
 # &카테고리 2에 대한 JSON 응답 생성
-def generate_category_2_response(image_file,extracted_events):
-    
+def generate_category_2_response(image,image_url,extracted_events):
+    filename = os.path.basename(image_url)
+
     return {
         "categoryId": 2, 
         "title": "아쥑", # !아직
         "list": extracted_events, 
-        "photoName": image_file.filename,
-        "photoUrl": ""  # ?URL이 제공된 경우 추가
+        "photoName": filename,
+        "photoUrl": image_url
     }
 
 # &카테고리 3에 대한 JSON 응답 생성
-def generate_category_3_response(image_file, text_results):
+def generate_category_3_response(image,image_url, text_results):
+
+    filename = os.path.basename(image_url)
+
     """카테고리 3에 대한 JSON 응답 생성"""
     return {
         "categoryId": 3,
         "title": "아쥑", # !아직
         "summary": " ".join(text_results),  # !카테고리 3에 요약이 필요할 경우 처리 필요  
-        "photoName": image_file.filename,
-        "photoUrl": ""  # ?URL이 제공된 경우 추가
+        "photoName": filename,
+        "photoUrl":image_url
     }
 
 
@@ -246,26 +260,31 @@ def analyze_image():
     
     # URL 파라미터 받기
     image_url = request.form.get('imageUrl')
+    print("image_url", image_url)
     if not image_url:
         return jsonify({'error': '이미지 URL이 제공되지 않았습니다.'}), 400
     
     # 이미지 다운로드
     img = download_image_from_url(image_url)
+    print("img", img)
     if img is None:
         return jsonify({'error': '이미지 다운로드에 실패했습니다.'}), 400
-    # 이미지 다운로드
-    img = download_image_from_url(image_url)
     
+    print("ocr")
     # OCR 수행
     ocr_results = perform_ocr(img)
     
+    print("ocr formatted")
     # OCR 결과 텍스트 추출 및 줄바꿈 포맷 적용
     formatted_text = format_ocr_result(ocr_results)
 
+    print("hastag")
     # 해시태그
     formatted_text,hashtags = remove_summary(formatted_text)
 
+
     sentences = formatted_text.split('\n')
+
 
     # &날짜 추출 및 정보 저장
     # &장소 정보 추출
@@ -274,23 +293,26 @@ def analyze_image():
 
 
     for sentence in sentences:
-        
+        print("date")
         # &카테고리2 events
         extracted_events.extend(extract_dates_and_events(sentence))
         
-
+        print("add")
         # &카테고리1 address 
         address_extracted = False    
         places = extract_places(sentence)
 
+        print("find place")
         if places:
             extracted_places.extend(places)
             address_extracted = True
         
+        print("find add")
         if address_extracted:
             continue
         
 
+    print("category")
     # &카테고리 결정 
     if extracted_places:
         category_id = 1
@@ -299,14 +321,16 @@ def analyze_image():
     else:
         category_id = 3
     
+    print("return")
     # &return 
     if category_id == 1:
-        response_data = generate_category_1_response(image_file, formatted_text, extracted_places,hashtags)
+        response_data = generate_category_1_response(img,image_url, formatted_text, extracted_places,hashtags)
     elif category_id == 2:
-        response_data = generate_category_2_response(image_file,extracted_events)
+        response_data = generate_category_2_response(img,image_url,extracted_events)
     else:
-        response_data = generate_category_3_response(image_file, formatted_text)
+        response_data = generate_category_3_response(img,image_url, formatted_text)
     
+    print("[RESPONE] ", response_data)
     return jsonify(response_data)
 
 
@@ -315,16 +339,6 @@ def index():
     return render_template('index.html')
 
 
-@app.route("/update_server",methods=["POST"])
-def webhook():
-    if request.method =="POST":
-        repo  = git.Repo("깃허브 레포  주소")
-        origin = repo.remotes.origin
-        origin.pull()
-
-        return "Pythonanywhere 서버에 성공적으로 업로드되었습니다", 200
-    else:
-        return "유효하지 않은 이벤트 타입입니다.", 400 
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run('0.0.0.0', port=5001, debug=True)
