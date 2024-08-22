@@ -1,0 +1,40 @@
+name: Deploy to Server
+
+on:
+    push:
+        branches:
+            - ys
+
+jobs:
+    deploy:
+        runs-on: ubuntu-latest
+
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v3
+
+            - name: Build Docker image
+              run: |
+                  docker build -t ai:1 .
+
+            - name: Copy files to server
+              env:
+                  SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+                  SERVER_USER: ${{ secrets.SERVER_USER }}
+                  SERVER_IP: ${{ secrets.SERVER_IP }}
+              run: |
+                  mkdir -p ~/.ssh
+                  echo "$SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
+                  chmod 600 ~/.ssh/id_rsa
+                  rsync -avz --exclude='.git*' --exclude='*.yml' ./ $SERVER_USER@$SERVER_IP:/path/to/deployment/
+
+            - name: SSH and deploy
+              env:
+                  SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+                  SERVER_USER: ${{ secrets.SERVER_USER }}
+                  SERVER_IP: ${{ secrets.SERVER_IP }}
+              run: |
+                  ssh -o StrictHostKeyChecking=no $SERVER_USER@$SERVER_IP << 'EOF'
+                    cd /path/to/deployment/
+                    docker-compose -f ./docker-compose.yml up -d
+                  EOF
